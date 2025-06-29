@@ -1,0 +1,138 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+import json
+from keras.models import load_model
+from keras.preprocessing.image import img_to_array
+import os
+import pygame
+
+# === CONFIGURATION ===
+MODEL_PATH = "gesture_model.h5"
+CLASS_NAMES_PATH = "class_names.json"
+AUDIO_PATH = "/media/raspberry/son-alph"
+VIDEO_SOURCE = 0
+
+# === LOAD MODEL ===
+model = load_model(MODEL_PATH)
+
+# === LOAD CLASS LABELS ===
+with open(CLASS_NAMES_PATH, "r", encoding="utf-8") as f:
+    class_indices = json.load(f)
+    class_names = {v: k for k, v in class_indices.items()}
+
+# === INITIALIZE PYGAME AUDIO ===
+pygame.mixer.init()
+
+# === FUNCTION TO PLAY LETTER AUDIO ===
+def play_letter_audio(letter):
+    audio_file = os.path.join(AUDIO_PATH, f"{letter}.wav")
+    if os.path.exists(audio_file):
+        try:
+            pygame.mixer.music.load(audio_file)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                continue
+        except Exception as e:
+            print(f"⚠️ Audio playback error (pygame): {e}")
+    else:
+        print(f"⚠️ Missing audio for letter: {letter}")
+
+# === MEDIAPIPE HAND TRACKING INITIALIZATION ===
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+mp_draw = mp.solutions.drawing_utils
+
+# === INITIALIZE VIDEO CAPTURE ===
+cap = cv2.VideoCapture(VIDEO_SOURCE)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+# === CHECK CAMERA AVAILABILITY ===
+if not cap.isOpened():
+    print("❌ Unable to open the camera.")
+    exit()
+
+# === STABILIZATION VARIABLES ===
+last_letter = ""
+stable_letter = ""
+stable_counter = 0
+STABILITY_THRESHOLD = 5
+print("✅ System ready. Press 'q' to quit.")
+
+# === MAIN LOOP: Continuously capture video frames and perform gesture recognition ===
+while True:
+    # Read a frame from the webcam
+    ret, frame = cap.read()
+    if not ret:
+        print("❌ Failed to capture frame.")
+        break
+
+    # Convert the BGR image to RGB for MediaPipe processing
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(frame_rgb)  # Detect hands
+    label = ""
+
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            # Draw landmarks and connections on the frame
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            # Get bounding box with padding
+            coords = np.array([
+                (lm.x * frame.shape[1], lm.y * frame.shape[0])
+                for lm in hand_landmarks.landmark
+            ])
+            x_min, y_min = np.maximum(coords.min(axis=0) - 20, 0).astype(int)
+            x_max, y_max = np.minimum(coords.max(axis=0) + 20, frame.shape[1::-1]).astype(int)
+
+            # Extract ROI
+            roi = frame[y_min:y_max, x_min:x_max]
+            if roi.size == 0:
+                continue
+
+            # Preprocess the ROI image for model prediction
+            roi_resized = cv2.resize(roi, (128, 128))
+            roi_array = img_to_array(roi_resized) / 255.0
+            roi_array = np.expand_dims(roi_array, axis=0)
+
+            # Predict the letter
+            prediction = model.predict(roi_array, verbose=0)
+            class_index = np.argmax(prediction)
+            confidence = prediction[0][class_index]
+            predicted_letter = class_names[class_index]
+            label = f"{predicted_letter} ({confidence:.2f})"
+
+            # Stabilization logic: only accept stable predictions
+            if predicted_letter == stable_letter:
+                stable_counter += 1
+            else:
+                stable_counter = 1
+                stable_letter = predicted_letter
+
+            # If the letter has been stable for enough frames
+            if stable_counter >= STABILITY_THRESHOLD:
+                if predicted_letter != last_letter:
+                    play_letter_audio(predicted_letter)
+                    print(f"✅ Stable letter detected: {predicted_letter}")
+                    last_letter = predicted_letter
+                stable_counter = 0
+
+            # Draw the bounding box and prediction label on the frame
+            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (255, 0, 0), 2)
+            cv2.putText(frame, label, (x_min, y_min - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+    # Show the processed frame
+    cv2.imshow("Arabic Sign Language Recognition", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+# === CLEANUP ===
+cap.release()
+cv2.destroyAllWindows()
+pygame.mixer.quit()
