@@ -1,2 +1,3 @@
-# code1-signpin
-Training Without Transfer Learning
+# code-SignPin
+code1 Training Without Transfer Learning
+ code2 Training with Transfer Learning (MobileNetV2)
